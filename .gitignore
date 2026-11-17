@@ -1,0 +1,7 @@
+# audio, caches and generated output stay local (recordings are not ours to redistribute)
+data/
+out/
+analysis/
+__pycache__/
+.venv/
+.DS_Store
