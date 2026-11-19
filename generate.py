@@ -1,18 +1,16 @@
-"""Generate new 'recitations' with a Markov chain, played on a single oscillator.
+"""Workflow steps 3-5 (Markov chain, bird measurements, oscillator): a poet's intonation, sung by a
+bird, on a single oscillator.
 
-The chain walks the symbolic states from analyze.py (order k, backing off to shorter contexts
-when a context was never seen). For each sounding state it borrows the contour, duration and
-loudness of a random real unit in that state, so the micro-shape stays speech-like while the
-sequence is new. Everything is rendered by one oscillator: pitch = base * 2^(st/12).
+  poet recording -> units -> labels -> Markov chain -> new label sequence -> poet's real syllable shapes
+  bird recordings -> units -> 4 measurements --------------------------------> scale pitch, speed, range
+                                                                               one oscillator -> sound
 
-Usage: python generate.py [--dataset ganjoor] [--source NAME] [--order 2] [--seconds 30] [--base 160]
-                          [--wave sine] [--range 1.0] [--tempo 1.0] [--seed N] [--out out/name.wav]
---source trains the chain on one source only (e.g. one poet).
---sing-like DATASET:SOURCE sets base, tempo, pause tempo and range to match another voice, e.g. a poet sung by a
-blackbird: --dataset pennsound --source Ashbery --sing-like birds:Turdus_merula
---words "TEXT" (or --words-file, or --random-words N) puts the melody on spoken words, see words.py:
-  --voice vocoder (the oscillator talks), speech (a voice re-intoned) or both; --tts-voice picks the
-  macOS voice. The text sets the rhythm, so --tempo is ignored.
+The chain walks the poet's labels (order k, backing off to shorter contexts it never saw). Each sounding
+label borrows the contour, duration and loudness of a random real unit with that label. The bird only
+supplies centre pitch, note length, pause length and pitch spread, which resize those units.
+
+Usage: python generate.py --dataset pennsound --source Ashbery --bird Turdus_merula
+                          [--order 2] [--seconds 30] [--wave sine] [--seed N] [--out out/name.wav]
 """
 import argparse
 import random
@@ -22,7 +20,7 @@ from pathlib import Path
 import numpy as np
 from scipy.io import wavfile
 
-from analyze import load_clips, tokenize
+from labels import load_clips, tokenize
 import extract
 
 ROOT = Path(__file__).parent
@@ -32,16 +30,22 @@ TIGHT_GAP = (0.0, 0.08)  # gap after a unit when no pause token follows
 
 
 class Chain:
+    """Order-k Markov chain over label tokens, keeping counts for every order 0..k."""
+
     def __init__(self, seqs, order):
         self.order = order
         self.table = defaultdict(Counter)  # context tuple -> next-token counts, all orders 0..k
         for s in seqs:
-            toks = ["||"] * order + s
+            toks = ["||"] * order + s  # every clip starts as if after a phrase break
             for i in range(order, len(toks)):
                 for k in range(order + 1):
                     self.table[tuple(toks[i - k:i])][toks[i]] += 1
 
     def next(self, history, rng):
+        """Draw the next token after `history`, weighted by how often it followed in the poet's data.
+
+        Uses the longest context that was seen, backing off to shorter ones (down to overall
+        frequencies) so the walk never gets stuck on a combination the poet never produced."""
         for k in range(self.order, -1, -1):
             ctx = tuple(history[-k:]) if k else ()
             if ctx in self.table:
@@ -62,7 +66,11 @@ def build_model(clips, order):
 
 
 def compose(clips, order, seconds, tempo, pause_tempo, rng):
-    """Return a list of events: ('note', unit, gap_after) with real-unit shapes."""
+    """Walk the chain for about `seconds` and turn its tokens into note events.
+
+    Each event is a dict {state, contour, dur, loud, gap} copied from a random real unit with that
+    label, with its length divided by `tempo`. A pause token sets the previous note's gap instead.
+    """
     chain, pools = build_model(clips, order)
     history, events, t = ["||"] * order, [], 0.0
     while t < seconds:
@@ -157,6 +165,7 @@ def voice(clips):
 
 
 def select(clips, source):
+    """Clips of one source (case-insensitive), or all clips when source is None."""
     if not source:
         return clips
     clips = [c for c in clips if c["source"].lower() == source.lower()]
@@ -166,61 +175,30 @@ def select(clips, source):
 
 
 def main():
+    """Command line: build the poet's chain, measure the bird, render and save the .wav and picture."""
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", default="ganjoor")
-    ap.add_argument("--source", default=None, help="only learn from this source (case-insensitive)")
+    ap.add_argument("--dataset", default="pennsound", help="poet recordings (data/<dataset>/)")
+    ap.add_argument("--source", default=None, help="the poet to learn from (case-insensitive); default all")
+    ap.add_argument("--bird", default="Turdus_merula", help="species in data/birds/ that sets pitch, speed, range")
     ap.add_argument("--order", type=int, default=2)
     ap.add_argument("--seconds", type=float, default=30)
-    ap.add_argument("--base", type=float, default=160, help="oscillator centre pitch in Hz")
     ap.add_argument("--wave", choices=["sine", "triangle", "saw", "square"], default="sine")
-    ap.add_argument("--range", type=float, default=1.0, help="scale pitch movement (2 = twice as wide)")
-    ap.add_argument("--tempo", type=float, default=1.0, help="speed factor")
-    ap.add_argument("--pause-tempo", type=float, default=None, help="speed factor for pauses (default: --tempo)")
-    ap.add_argument("--sing-like", default=None, metavar="DATASET:SOURCE",
-                    help="match base, tempo and range to another voice (overrides those flags)")
-    ap.add_argument("--words", default=None, help="speak this text with the generated intonation")
-    ap.add_argument("--words-file", type=Path, default=None, help="text file to speak")
-    ap.add_argument("--random-words", type=int, default=None, metavar="N", help="speak N random words")
-    ap.add_argument("--word-kind", choices=["real", "nonsense"], default="real",
-                    help="random dictionary words or made-up pseudo-words")
-    ap.add_argument("--voice", choices=["vocoder", "speech", "both"], default="both")
-    ap.add_argument("--tts-voice", default="Daniel", help="macOS voice for the words (say -v '?')")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--out", type=Path, default=None)
     a = ap.parse_args()
 
     rng = random.Random(a.seed)
     clips = select(load_clips(a.dataset), a.source)
-    if a.sing_like:
-        ds, _, src = a.sing_like.partition(":")
-        (_, dur, spread, pause), (hz, t_dur, t_spread, t_pause) = voice(clips), voice(select(load_clips(ds), src))
-        # pauses scale separately: birds and poets pause for similar lengths even though their notes differ ~3x
-        a.base, a.tempo, a.range, a.pause_tempo = hz, dur / t_dur, t_spread / spread, pause / t_pause
-        print(f"singing like {a.sing_like}: base {a.base:.0f} Hz, tempo x{a.tempo:.2f}, "
-              f"pauses x{a.pause_tempo:.2f}, range x{a.range:.2f}")
-    tag = f"{a.source}_" if a.source else ""
-    if a.sing_like:
-        tag += f"as_{a.sing_like.partition(':')[2] or a.sing_like}_"
-    seed_tag = a.seed if a.seed is not None else "rand"
+    (_, dur, spread, pause), (base, b_dur, b_spread, b_pause) = voice(clips), voice(select(load_clips("birds"), a.bird))
+    # pauses scale separately: birds and poets pause for similar lengths even though their notes differ ~3x
+    tempo, pause_tempo, pitch_range = dur / b_dur, pause / b_pause, b_spread / spread
+    print(f"{a.source or a.dataset} as {a.bird}: base {base:.0f} Hz, tempo x{tempo:.2f}, "
+          f"pauses x{pause_tempo:.2f}, range x{pitch_range:.2f}")
 
-    if a.words or a.words_file or a.random_words:
-        import words  # imports this module, so only on demand
-
-        if a.random_words:
-            text = words.random_text(a.random_words, a.word_kind, rng)
-            tag += f"random-{a.word_kind}_"
-            print("text:", text)
-        else:
-            text = a.words_file.read_text().strip() if a.words_file else a.words
-        wave = "saw" if a.wave == "sine" and a.voice != "speech" else a.wave  # a sine has no harmonics to shape
-        out = a.out or ROOT / "out" / "words" / f"words_{a.dataset}_{tag}{seed_tag}.wav"
-        words.speak(text, clips, a.order, a.base, a.range, wave, a.voice, a.tts_voice, rng, out)
-        return
-
-    events = compose(clips, a.order, a.seconds, a.tempo, a.pause_tempo or a.tempo, rng)
-    y, st, amp = render(events, a.base, a.wave, a.range)
-    name = f"gen_{tag}o{a.order}_{a.wave}_{seed_tag}.wav"
-    out = a.out or ROOT / "out" / a.dataset / name
+    events = compose(clips, a.order, a.seconds, tempo, pause_tempo, rng)
+    y, st, amp = render(events, base, a.wave, pitch_range)
+    name = f"gen_{a.source or a.dataset}_as_{a.bird}_o{a.order}_{a.wave}_{a.seed if a.seed is not None else 'rand'}.wav"
+    out = a.out or ROOT / "out" / name
     out.parent.mkdir(parents=True, exist_ok=True)
     wavfile.write(out, SR, y)
     picture(st, amp, out.with_suffix(".png"))

@@ -1,4 +1,5 @@
-"""Download a random sample of recitations from the Ganjoor poetry audio dataset.
+"""Workflow step 0 (poet recordings): download a random sample of Persian recitations from the
+Ganjoor poetry audio dataset on Hugging Face into data/ganjoor/audio/.
 
 Usage: python download.py [n_files] [seed]
 Files are spread evenly over the dataset's shard folders so no single source dominates.
@@ -13,10 +14,11 @@ from pathlib import Path
 REPO = "Reza2kn/ganjoor-chizzled-poetry-review-audio"
 API = f"https://huggingface.co/api/datasets/{REPO}"
 RESOLVE = f"https://huggingface.co/datasets/{REPO}/resolve/main/"
-OUT = Path(__file__).parent / "data" / "audio"
+OUT = Path(__file__).parent / "data" / "ganjoor" / "audio"
 
 
 def main(n=200, seed=0):
+    """Pick n files spread over the dataset's shard folders and download the ones not yet present."""
     OUT.mkdir(parents=True, exist_ok=True)
     meta = json.load(urllib.request.urlopen(API))
     by_shard = defaultdict(list)
@@ -33,6 +35,7 @@ def main(n=200, seed=0):
     picks = picks[:n]
 
     for i, name in enumerate(picks):
+        # <source>__<file>: extract.py takes everything before "__" as the clip's source
         dest = OUT / f"{name.split('/')[1]}__{Path(name).name}"
         if dest.exists():
             continue

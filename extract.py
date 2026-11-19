@@ -1,11 +1,11 @@
-"""Translate recitations into intonation units ("bird-song" style transcription).
+"""Workflow step 1 (units): translate recordings into intonation units ("bird-song" style transcription).
 
 For every clip:
-  1. track f0 with pYIN (10 ms hop)
+  1. track pitch every 10 ms (pYIN for speech, strongest spectral peak for birds; cached in data/<dataset>/f0/)
   2. convert to semitones relative to the reader's median pitch (speaker normalisation:
      per clip by default, per source with --per-source, e.g. one baseline per poet)
   3. cut the track into voiced units (~syllables) separated by unvoiced gaps
-  4. describe each unit: level, start/end pitch, slope, duration, loudness, gap after,
+  4. describe each unit: level, start/end pitch, duration, loudness, gap after,
      and a fixed-length contour shape (8 points)
   5. draw the clip as pitch strokes on a dark canvas, like the video's visualisations
 
@@ -68,10 +68,12 @@ def paths(dataset):
 
 
 def source_of(path):
+    """Clip files are named <source>__<rest>; the source is the poet, species or dataset shard."""
     return path.name.split("__")[0]
 
 
 def load(path):
+    """Decode any audio file to mono float32 at the profile's sample rate (needs ffmpeg)."""
     raw = subprocess.run(
         ["ffmpeg", "-v", "quiet", "-i", str(path), "-ac", "1", "-ar", str(SR), "-f", "f32le", "-"],
         capture_output=True, check=True,
@@ -98,10 +100,10 @@ def voiced_runs(voiced):
     return [r for r in merged if (r[1] - r[0]) * FRAME_S >= MIN_UNIT_S]
 
 
-def syllables(a, b, db, dip_db=None):
+def syllables(a, b, db):
     """Split a voiced run at loudness dips; returns (start, end) pieces of at least MIN_UNIT_S."""
     seg = np.convolve(np.pad(db[a:b], DIP_SMOOTH // 2, mode="edge"), np.ones(DIP_SMOOTH) / DIP_SMOOTH, mode="valid")
-    dips, _ = find_peaks(-seg, prominence=dip_db or SYLL_DIP_DB)
+    dips, _ = find_peaks(-seg, prominence=SYLL_DIP_DB)
     min_len = int(MIN_UNIT_S / FRAME_S)
     cuts = [a]
     for d in dips + a:
@@ -154,6 +156,11 @@ def track(path, cache):
 
 
 def analyse(path, cache, median_hz=None):
+    """Clip -> dict with its units, or None when it has too little voicing to use.
+
+    median_hz is the pitch that counts as 0 semitones: the source's median with --per-source,
+    otherwise this clip's own median. '_st' and '_db' are frame data for draw() only.
+    """
     f0, voiced, db, duration = track(path, cache)
     voiced = gate(voiced, db)
     if voiced.sum() < 20 or voiced.mean() < MIN_VOICED:
@@ -163,7 +170,7 @@ def analyse(path, cache, median_hz=None):
 
     units = []
     runs = voiced_runs(voiced)
-    pieces = []  # (start, end, gap after)
+    pieces = []  # (start, end, gap after); syllables split inside a voiced run have gap 0
     for k, (a, b) in enumerate(runs):
         sy = syllables(a, b, db)
         gap = (runs[k + 1][0] - b) * FRAME_S if k + 1 < len(runs) else None
@@ -181,7 +188,6 @@ def analyse(path, cache, median_hz=None):
             "level": round(float(np.mean(seg)), 2),
             "start": round(float(contour[0]), 2),
             "end": round(float(contour[-1]), 2),
-            "slope": round(float((contour[-1] - contour[0]) / dur), 2),  # st per second
             "loud": round(float(np.mean(db[a:b]) - np.max(db)), 1),  # dB below clip peak
             "contour": [round(float(c), 2) for c in contour],
         })
@@ -210,6 +216,7 @@ def draw(clip, out):
 
 
 def track_only(path, cache):
+    """Pass 1 (in worker processes): fill the pitch cache; a broken file is reported and skipped."""
     try:
         track(path, cache)
     except Exception as e:  # corrupt/odd files shouldn't kill the batch
@@ -228,6 +235,7 @@ def source_medians(files, cache):
 
 
 def work(path, cache, pics, median_hz):
+    """Pass 2 (in worker processes): cut one cached clip into units and draw its picture."""
     if not (cache / (path.stem + ".npz")).exists():
         return None
     clip = analyse(path, cache, median_hz)
@@ -239,6 +247,7 @@ def work(path, cache, pics, median_hz):
 
 
 def main():
+    """Command line: track all clips, compute per-source baselines if asked, write units.json."""
     ap = argparse.ArgumentParser()
     ap.add_argument("dataset", nargs="?", default="ganjoor")
     ap.add_argument("--profile", choices=PROFILES, default="speech")
@@ -251,8 +260,9 @@ def main():
     cache.mkdir(parents=True, exist_ok=True)
     files = sorted(f for f in audio.iterdir() if f.suffix in AUDIO_EXT)[: a.limit]
     # compile librosa's numba kernels once here; parallel first-compiles can corrupt its disk cache
-    librosa.pyin(np.random.default_rng(0).standard_normal(SR).astype(np.float32) * 0.1,
-                 fmin=FMIN, fmax=FMAX, sr=SR, frame_length=FRAME_LEN, hop_length=HOP)
+    if TRACKER == "pyin":
+        librosa.pyin(np.random.default_rng(0).standard_normal(SR).astype(np.float32) * 0.1,
+                     fmin=FMIN, fmax=FMAX, sr=SR, frame_length=FRAME_LEN, hop_length=HOP)
     with ProcessPoolExecutor(initializer=configure, initargs=(a.profile,)) as pool:
         list(pool.map(track_only, files, repeat(cache)))
         medians = source_medians(files, cache) if a.per_source else {}

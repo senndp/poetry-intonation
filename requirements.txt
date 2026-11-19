@@ -2,5 +2,3 @@ numpy
 scipy
 librosa
 matplotlib
-soundfile
-praat-parselmouth

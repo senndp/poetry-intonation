@@ -1,4 +1,6 @@
-"""Download bird song from the CC0 iNaturalist part of SaiPavankumar22/bird-sounds and cut it into clips.
+"""Workflow step 0 (bird recordings): download bird song from the CC0 iNaturalist part of
+SaiPavankumar22/bird-sounds and cut it into clips. The bird only supplies 4 measurements to
+generate.py (pitch, note length, pause length, pitch spread); it never gets a Markov chain.
 
 Usage: python birds.py [--per-species 25] [--minutes 6] Turdus_merula Fringilla_coelebs ...
 Raw files -> data/birds/raw/<Species>/, clips -> data/birds/audio/ (32 kHz, birds sing up to ~8 kHz)
@@ -21,6 +23,7 @@ DEFAULT = ["Turdus_merula", "Turdus_philomelos", "Luscinia_megarhynchos", "Fring
 
 
 def main():
+    """Download up to --per-species recordings per species, then chunk them into 15 s clips."""
     ap = argparse.ArgumentParser()
     ap.add_argument("species", nargs="*", default=DEFAULT)
     ap.add_argument("--per-species", type=int, default=25, help="recordings to download per species")

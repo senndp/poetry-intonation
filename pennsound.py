@@ -1,56 +1,37 @@
-"""Bring PennSound readings into the pipeline.
+"""Workflow step 0 (poet recordings): cut long poetry readings into clips.
+birds.py reuses chunk() for the bird recordings.
 
-PennSound (writing.upenn.edu/pennsound) offers poets' readings as MP3s for noncommercial, educational use;
-rights stay with the poets. Keep data/pennsound/ to yourself and share only generated output.
+Put a poet's readings (MP3s saved from PennSound, archive.org, ...) in data/pennsound/raw/<Poet>/.
+Readings rarely may be redistributed, so data/ stays out of git.
 
-  python pennsound.py download Ginsberg [--max-files 6]   # MP3 links from the poet's author page
-  python pennsound.py chunk [--minutes 15]                # long readings -> 30 s clips per poet
+  python pennsound.py [--minutes 15]
 
-Instead of downloading you can drop MP3s into data/pennsound/raw/<Poet>/ by hand.
-Readings are long and start with an introduction, so `chunk` skips each file's first 45 s and samples
-30 s chunks spread over every file, up to the same number of minutes per poet.
-Then: python extract.py pennsound --per-source && python analyze.py pennsound
+Readings start with an introduction, so each file's first 45 s is skipped; 30 s chunks are sampled
+across every file, up to the same number of minutes per poet.
+Then: python extract.py pennsound --per-source
 """
 import argparse
 import random
 import re
 import subprocess
-import time
-import urllib.request
 from pathlib import Path
-from urllib.parse import unquote, urljoin
 
 ROOT = Path(__file__).parent
-PAGE = "https://writing.upenn.edu/pennsound/x/{}.php"
-HEADERS = {"User-Agent": "poetry-intonation/0.1 (research script; small sample, rate-limited)"}
-
-
-def fetch(url):
-    return urllib.request.urlopen(urllib.request.Request(url, headers=HEADERS), timeout=60).read()
-
-
-def download(poet, page, max_files, seed, dataset):
-    page = page or PAGE.format(poet)
-    html = fetch(page).decode("utf-8", "replace")
-    links = sorted({urljoin(page, h) for h in re.findall(r'href="([^"]+\.mp3)"', html, re.I)})
-    print(f"{len(links)} mp3 links on {page}")
-    out = ROOT / "data" / dataset / "raw" / poet
-    out.mkdir(parents=True, exist_ok=True)
-    for url in random.Random(seed).sample(links, min(max_files, len(links))):
-        dest = out / unquote(url.rsplit("/", 1)[1])
-        if not dest.exists():
-            dest.write_bytes(fetch(url))
-            print("  ", dest.name)
-            time.sleep(2)  # be gentle with the archive
 
 
 def duration(path):
+    """Length of an audio file in seconds (0 if ffprobe can't read it)."""
     out = subprocess.run(["ffprobe", "-v", "quiet", "-show_entries", "format=duration", "-of", "csv=p=0", str(path)],
                          capture_output=True, text=True).stdout.strip()
     return float(out) if out else 0.0
 
 
 def chunk(minutes, length, skip_start, seed, dataset, sr=16000):
+    """Cut every file in data/<dataset>/raw/<Name>/ into mono clips of `length` s at `sr` Hz.
+
+    Clips are sampled at random over all of a name's files, up to `minutes` per name, and saved as
+    data/<dataset>/audio/<Name>__<file>__<start s>.wav (the folder name becomes the clip's source).
+    """
     raw = ROOT / "data" / dataset / "raw"
     audio = ROOT / "data" / dataset / "audio"
     audio.mkdir(parents=True, exist_ok=True)
@@ -73,24 +54,15 @@ def chunk(minutes, length, skip_start, seed, dataset, sr=16000):
 
 
 def main():
+    """Command line: chunk all poets in data/<dataset>/raw/."""
     ap = argparse.ArgumentParser()
     ap.add_argument("--dataset", default="pennsound")
-    sub = ap.add_subparsers(dest="cmd", required=True)
-    d = sub.add_parser("download")
-    d.add_argument("poet", help="folder name, and the author page name when --page is omitted")
-    d.add_argument("--page", help="author page URL (default writing.upenn.edu/pennsound/x/<poet>.php)")
-    d.add_argument("--max-files", type=int, default=6)
-    d.add_argument("--seed", type=int, default=0)
-    c = sub.add_parser("chunk")
-    c.add_argument("--minutes", type=float, default=15, help="per poet")
-    c.add_argument("--length", type=int, default=30, help="chunk seconds")
-    c.add_argument("--skip-start", type=float, default=45, help="skip introductions")
-    c.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--minutes", type=float, default=15, help="per poet")
+    ap.add_argument("--length", type=int, default=30, help="chunk seconds")
+    ap.add_argument("--skip-start", type=float, default=45, help="skip introductions")
+    ap.add_argument("--seed", type=int, default=0)
     a = ap.parse_args()
-    if a.cmd == "download":
-        download(a.poet, a.page, a.max_files, a.seed, a.dataset)
-    else:
-        chunk(a.minutes, a.length, a.skip_start, a.seed, a.dataset)
+    chunk(a.minutes, a.length, a.skip_start, a.seed, a.dataset)
 
 
 if __name__ == "__main__":
